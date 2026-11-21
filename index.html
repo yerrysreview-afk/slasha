@@ -75,26 +75,43 @@ async function online(code){
   const roomId='slasha-'+code;
   const status=msg=>{const el=$('#wmsg');if(el)el.textContent=msg};
 
-  // Build a thin net facade that mirrors the original API
-  const handlers={};
-  let peer=null,conn=null,isHost=false,pres={hp:HP,st:100,rdy:1},presTimer=null;
+  let peer=null,conn=null,pres={hp:HP,st:100,rdy:1},presTimer=null;
 
-  function wireConn(c){
+  function onConnected(c, remoteId){
     conn=c;
+    oppId=remoteId;
+    status('Connected!');
+    // Always wait for the data channel to be fully open before sending
+    const go=()=>{
+      me.rdy=1;
+      net.presence({hp:HP,st:100,rdy:1});
+      startPresence();
+      // Keep pinging ready while waiting so the other side can't miss it
+      const readyPing=setInterval(()=>{
+        if(phase!=='wait'&&phase!=='over'){clearInterval(readyPing);return}
+        try{if(conn&&conn.open)conn.send({t:'pres',hp:Math.round(me.hp),st:Math.round(me.st),rdy:me.rdy||1})}catch(e){}
+      },400);
+      check();
+    };
+    if(c.open)go();
+    else c.on('open',go);
+
     c.on('data',msg=>{
       if(!msg||typeof msg!=='object')return;
       if(msg.t==='pres'){
         if(typeof msg.hp==='number'){
           if(phase==='fight'&&now()-fightT>800){opp.hp=Math.min(opp.hp,msg.hp);if(opp.hp<=0)end(true)}
         }
-        if(typeof msg.rdy==='number')oppRdy=msg.rdy;
-        check();
+        if(typeof msg.rdy==='number'){
+          oppRdy=msg.rdy;
+          check();
+        }
         return;
       }
       if(msg.t==='hit'&&phase==='fight'){
         const pts=(Array.isArray(msg.p)?msg.p:[]).slice(0,24).map(a=>[clamp(+a[0]||0,-.2,1.2),clamp(+a[1]||0,-.2,1.2)]);
         const r=receive(clamp(+msg.d||0,0,32),pts);
-        c.send({t:'res',o:r.o,d:r.dmg,hp:r.hp});
+        try{c.send({t:'res',o:r.o,d:r.dmg,hp:r.hp})}catch(e){}
         return;
       }
       if(msg.t==='res'){
@@ -113,7 +130,7 @@ async function online(code){
   function startPresence(){
     if(presTimer)clearInterval(presTimer);
     presTimer=setInterval(()=>{
-      if(!conn||conn.open===false)return;
+      if(!conn||!conn.open)return;
       if(phase==='fight'||phase==='count'){
         pres.hp=Math.round(me.hp);pres.st=Math.round(me.st);
         try{conn.send({t:'pres',...pres})}catch(e){}
@@ -128,8 +145,7 @@ async function online(code){
     },
     emit(type,data){
       if(!conn||!conn.open)return;
-      if(type==='hit')conn.send({t:'hit',d:data.d,p:data.p});
-      // res is handled automatically
+      if(type==='hit')try{conn.send({t:'hit',d:data.d,p:data.p})}catch(e){}
     },
     destroy(){
       if(presTimer)clearInterval(presTimer);
@@ -142,20 +158,15 @@ async function online(code){
   // Try to become host first
   peer=new Peer(roomId,{debug:0});
   peer.on('open',id=>{
-    isHost=true;myId=id;oppId=null;
+    myId=id;oppId=null;
     status('Waiting for opponent');
     peer.on('connection',c=>{
-      if(conn){c.close();return} // already have one
-      wireConn(c);
-      oppId=c.peer;
-      status('Opponent found!');
-      net.presence({hp:HP,st:100,rdy:1});
-      startPresence();
-      check();
+      if(conn){try{c.close()}catch(e){}return} // already have one
+      onConnected(c, c.peer);
     });
   });
   peer.on('error',err=>{
-    if(err.type==='unavailable-id'||(err.message&&err.message.includes('is taken'))){
+    if(err.type==='unavailable-id'||(err.message&&String(err.message).includes('is taken'))){
       // Become client
       try{peer.destroy()}catch(e){}
       peer=new Peer({debug:0});
@@ -163,17 +174,10 @@ async function online(code){
         myId=id;
         status('Joining…');
         const c=peer.connect(roomId,{reliable:true});
-        c.on('open',()=>{
-          wireConn(c);
-          oppId=roomId;
-          status('Connected!');
-          net.presence({hp:HP,st:100,rdy:1});
-          startPresence();
-          check();
-        });
+        c.on('open',()=>onConnected(c, roomId));
         c.on('error',()=>status('Could not reach host'));
       });
-      peer.on('error',e=>status('Connection failed'));
+      peer.on('error',()=>status('Connection failed'));
     }else if(err.type!=='peer-unavailable'){
       status('Network error — try again');
     }
@@ -181,8 +185,10 @@ async function online(code){
 }
 
 function check(){
+  // Initial join: both must have seen rdy=1. Rematch: both must have rdy === round+1
   if((phase==='wait'||phase==='over')&&oppId&&oppRdy===round+1&&(round===0||me.rdy===round+1)){
-    me.rdy=0;countdown();
+    me.rdy=0;
+    countdown();
   }
 }
 
