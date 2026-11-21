@@ -2,6 +2,7 @@
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <title>SLASHA</title>
+<script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
 <style>
 :root{--bg:#fff;--ink:#000;--red:#e5121b;--track:#ececec;--mute:#8a8a8a;color-scheme:light;box-sizing:border-box}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -42,40 +43,148 @@ const clamp=(v,a,b)=>Math.max(a,Math.min(b,v)),now=()=>performance.now();
 const HP=150;
 let phase='menu',mode='',round=0,net=null,myId=null,oppId=null,oppRdy=0,cdEnd=0,fightT=0,botNext=0;
 let me,opp,marks,pops,rings,fades,flash,shake,stats,last,ptr=null,ghost={m:100,o:100};
-function reset(){me={hp:HP,st:100,guard:false,gT:0,gx:0,gy:0,ex:false,last:0};opp={hp:HP};marks=[];pops=[];rings=[];fades=[];flash=0;shake=0;stats={dealt:0,n:0};last=null;ptr=null;ghost={m:HP,o:HP}}
+function reset(){me={hp:HP,st:100,guard:false,gT:0,gx:0,gy:0,ex:false,last:0,rdy:0};opp={hp:HP};marks=[];pops=[];rings=[];fades=[];flash=0;shake=0;stats={dealt:0,n:0};last=null;ptr=null;ghost={m:HP,o:HP}}
 reset();
 const buzz=n=>{try{navigator.vibrate&&navigator.vibrate(n)}catch(e){}};
 
 /* ---------- screens ---------- */
 function menu(){phase='menu';const c=Math.random().toString(36).slice(2,6).toUpperCase();
-ov.className='';ov.innerHTML=`<h1>SLASHA</h1><p>Swipe to slash<br>Hold to guard</p><input id="code" maxlength="6" value="${c}" aria-label="Room code"><button class="p" id="go">Duel online</button><button id="pr">Practice</button><p style="font-size:10px">Share the code · both players enter it</p>`;
+ov.className='';ov.innerHTML=`<h1><span style="color:#000">S</span><span style="color:var(--red)">L</span><span style="color:#000">A</span><span style="color:var(--red)">S</span><span style="color:#000">H</span><span style="color:var(--red)">A</span></h1><p>Swipe to slash<br>Hold to guard</p><input id="code" maxlength="6" value="${c}" aria-label="Room code"><button class="p" id="go">Duel online</button><button id="pr">Practice</button><p style="font-size:10px">Share the code · both players enter it</p>`;
 $('#go').onclick=()=>online($('#code').value.trim().toUpperCase()||c);$('#pr').onclick=practice;$('#code').addEventListener('pointerdown',e=>e.stopPropagation())}
-function wait(code){phase='wait';ov.className='';ov.innerHTML=`<h1 style="font-size:30px">${code}</h1><p>Waiting for opponent</p><button id="lv">Leave</button>`;$('#lv').onclick=()=>location.reload()}
+function wait(code){phase='wait';ov.className='';ov.innerHTML=`<h1 style="font-size:30px">${code}</h1><p id="wmsg">Connecting…</p><button id="lv">Leave</button>`;$('#lv').onclick=()=>{cleanupNet();location.reload()}}
 function end(win){if(phase==='over')return;phase='over';ptr=null;buzz(win?[30,40,30]:200);
 setTimeout(()=>{ov.className='';ov.innerHTML=`<h1 class="${win?'':'red'}" style="font-size:34px">${win?'VICTORY':'DEFEATED'}</h1><p>Damage dealt ${Math.round(stats.dealt)}<br>Slashes ${stats.n}</p><button class="p" id="rm">Rematch</button><button id="mn">Menu</button>`;
-$('#rm').onclick=()=>{if(mode==='practice')return countdown();me.rdy=round+1;net.presence({rdy:round+1});$('#rm').textContent='Waiting…';$('#rm').disabled=true;check()};$('#mn').onclick=()=>location.reload()},650)}
-function countdown(){round++;reset();phase='count';cdEnd=now()+3000;ov.className='hide';if(net)net.presence({hp:HP,st:100})}
+$('#rm').onclick=()=>{if(mode==='practice')return countdown();me.rdy=round+1;if(net)net.presence({rdy:round+1});$('#rm').textContent='Waiting…';$('#rm').disabled=true;check()};$('#mn').onclick=()=>{cleanupNet();location.reload()}},650)}
+function countdown(){round++;reset();phase='count';cdEnd=now()+3000;ov.className='hide';if(net)net.presence({hp:HP,st:100,rdy:0})}
 
 /* ---------- modes ---------- */
 function practice(){mode='practice';countdown()}
-async function online(code){mode='online';
-const cl=window.claude;const room=cl&&cl.use?await cl.use('room'):null;
-if(!room){ov.querySelector('p').innerHTML='Multiplayer unavailable here<br>Try practice';return}
-net=await room.join('slasha-'+code);net.presence({hp:HP,st:100,rdy:1});wait(code);
-net.onPeers(ch=>{const ps=[...ch.peers].filter(p=>p.kind==='viewer').sort((a,b)=>a.peer<b.peer?-1:1);
-const m=ch.peers.find(p=>p.isMe&&p.sameTab);if(!m)return;myId=m.peer;const pl=ps.slice(0,2);
-if(!pl.some(p=>p.peer===myId)){ov.querySelector('p').innerHTML='Room full';return}
-const o=pl.find(p=>p.peer!==myId);
-if(!o){if(oppId&&phase==='fight')end(true);if(phase==='count')menu();oppId=null;return}
-oppId=o.peer;const pr=o.presence||{};oppRdy=+pr.rdy||0;
-if(phase==='fight'&&now()-fightT>800&&typeof pr.hp==='number'){opp.hp=Math.min(opp.hp,pr.hp);if(opp.hp<=0)end(true)}
-check()});
-net.on('hit',m=>{if(m.isMe||!m.data||m.data.to!==myId||phase!=='fight')return;
-const pts=(Array.isArray(m.data.p)?m.data.p:[]).slice(0,24).map(a=>[clamp(+a[0]||0,-.2,1.2),clamp(+a[1]||0,-.2,1.2)]);
-const r=receive(clamp(+m.data.d||0,0,32),pts);net.emit('res',{to:m.peer,o:r.o,d:r.dmg,hp:r.hp})});
-net.on('res',m=>{if(m.isMe||!m.data||m.data.to!==myId)return;result(m.data)});
-setInterval(()=>{if(phase==='fight'||phase==='count')net.presence({hp:Math.round(me.hp),st:Math.round(me.st)})},120)}
-function check(){if((phase==='wait'||phase==='over')&&oppId&&oppRdy===round+1&&(round===0||me.rdy===round+1)){me.rdy=0;countdown()}}
+
+function cleanupNet(){
+  if(net){try{net.destroy()}catch(e){}net=null}
+  myId=oppId=null;oppRdy=0;
+}
+
+async function online(code){
+  mode='online';
+  if(typeof Peer==='undefined'){
+    ov.querySelector('p').innerHTML='PeerJS failed to load<br>Try practice or check connection';
+    return;
+  }
+  wait(code);
+  const roomId='slasha-'+code;
+  const status=msg=>{const el=$('#wmsg');if(el)el.textContent=msg};
+
+  // Build a thin net facade that mirrors the original API
+  const handlers={};
+  let peer=null,conn=null,isHost=false,pres={hp:HP,st:100,rdy:1},presTimer=null;
+
+  function wireConn(c){
+    conn=c;
+    c.on('data',msg=>{
+      if(!msg||typeof msg!=='object')return;
+      if(msg.t==='pres'){
+        if(typeof msg.hp==='number'){
+          if(phase==='fight'&&now()-fightT>800){opp.hp=Math.min(opp.hp,msg.hp);if(opp.hp<=0)end(true)}
+        }
+        if(typeof msg.rdy==='number')oppRdy=msg.rdy;
+        check();
+        return;
+      }
+      if(msg.t==='hit'&&phase==='fight'){
+        const pts=(Array.isArray(msg.p)?msg.p:[]).slice(0,24).map(a=>[clamp(+a[0]||0,-.2,1.2),clamp(+a[1]||0,-.2,1.2)]);
+        const r=receive(clamp(+msg.d||0,0,32),pts);
+        c.send({t:'res',o:r.o,d:r.dmg,hp:r.hp});
+        return;
+      }
+      if(msg.t==='res'){
+        result(msg);
+        return;
+      }
+    });
+    c.on('close',()=>{
+      if(phase==='fight'||phase==='count')end(true);
+      else if(phase==='wait'){status('Opponent left');oppId=null}
+      conn=null;oppId=null;
+    });
+    c.on('error',()=>{});
+  }
+
+  function startPresence(){
+    if(presTimer)clearInterval(presTimer);
+    presTimer=setInterval(()=>{
+      if(!conn||conn.open===false)return;
+      if(phase==='fight'||phase==='count'){
+        pres.hp=Math.round(me.hp);pres.st=Math.round(me.st);
+        try{conn.send({t:'pres',...pres})}catch(e){}
+      }
+    },120);
+  }
+
+  net={
+    presence(p){
+      Object.assign(pres,p);
+      if(conn&&conn.open)try{conn.send({t:'pres',...pres})}catch(e){}
+    },
+    emit(type,data){
+      if(!conn||!conn.open)return;
+      if(type==='hit')conn.send({t:'hit',d:data.d,p:data.p});
+      // res is handled automatically
+    },
+    destroy(){
+      if(presTimer)clearInterval(presTimer);
+      try{if(conn)conn.close()}catch(e){}
+      try{if(peer)peer.destroy()}catch(e){}
+      peer=conn=null;
+    }
+  };
+
+  // Try to become host first
+  peer=new Peer(roomId,{debug:0});
+  peer.on('open',id=>{
+    isHost=true;myId=id;oppId=null;
+    status('Waiting for opponent');
+    peer.on('connection',c=>{
+      if(conn){c.close();return} // already have one
+      wireConn(c);
+      oppId=c.peer;
+      status('Opponent found!');
+      net.presence({hp:HP,st:100,rdy:1});
+      startPresence();
+      check();
+    });
+  });
+  peer.on('error',err=>{
+    if(err.type==='unavailable-id'||(err.message&&err.message.includes('is taken'))){
+      // Become client
+      try{peer.destroy()}catch(e){}
+      peer=new Peer({debug:0});
+      peer.on('open',id=>{
+        myId=id;
+        status('Joining…');
+        const c=peer.connect(roomId,{reliable:true});
+        c.on('open',()=>{
+          wireConn(c);
+          oppId=roomId;
+          status('Connected!');
+          net.presence({hp:HP,st:100,rdy:1});
+          startPresence();
+          check();
+        });
+        c.on('error',()=>status('Could not reach host'));
+      });
+      peer.on('error',e=>status('Connection failed'));
+    }else if(err.type!=='peer-unavailable'){
+      status('Network error — try again');
+    }
+  });
+}
+
+function check(){
+  if((phase==='wait'||phase==='over')&&oppId&&oppRdy===round+1&&(round===0||me.rdy===round+1)){
+    me.rdy=0;countdown();
+  }
+}
 
 /* ---------- combat ---------- */
 function receive(d,p){let o='hit',dm=d;const t=now();
@@ -90,7 +199,7 @@ function result(r){opp.hp=clamp(+r.hp,0,HP);const t=now(),e=last||{x:W/2,y:H/2};
 const dmg=+r.d||0;stats.dealt+=dmg;
 pops.push({x:e.x,y:e.y,s:r.o==='parry'?'PARRIED':r.o==='block'?'BLOCKED '+dmg:'-'+dmg,c:r.o==='hit'?'#000':'#8a8a8a',t,big:r.o==='hit'});
 if(r.o==='hit')buzz(12);if(opp.hp<=0)end(true)}
-function send(d,p){if(mode==='online'){net.emit('hit',{to:oppId,d,p})}else{
+function send(d,p){if(mode==='online'){net&&net.emit('hit',{to:oppId,d,p})}else{
 const g=Math.random()<.3,ap=g?Math.round(d*.2):d;opp.hp=Math.max(0,opp.hp-ap);
 setTimeout(()=>{if(phase==='fight')result({o:g?'block':'hit',d:ap,hp:opp.hp})},50+Math.random()*70)}}
 function botTick(t){if(mode!=='practice'||phase!=='fight'||t<botNext)return;botNext=t+1100+Math.random()*1800;
